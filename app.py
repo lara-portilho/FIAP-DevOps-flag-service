@@ -18,8 +18,6 @@ load_dotenv()
 
 app = Flask(__name__)
 
-raise Exception('Teste')
-
 # --- Configuração ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
