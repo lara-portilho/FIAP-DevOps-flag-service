@@ -7,10 +7,36 @@ from psycopg2.pool import SimpleConnectionPool
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from functools import wraps
+import json
 import logging
 
-# Configura o logging
-logging.basicConfig(level=logging.INFO)
+
+class JsonFormatter(logging.Formatter):
+    """ Log em JSON (uma linha por evento) para o Alloy/Loki. Os campos otelTraceID e
+    otelSpanID são injetados pela instrumentação de logging do OpenTelemetry
+    (OTEL_PYTHON_LOG_CORRELATION=true) e permitem pular do log para o trace. """
+
+    def format(self, record):
+        entry = {
+            "time": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        trace_id = getattr(record, "otelTraceID", "0")
+        if trace_id and trace_id != "0":
+            entry["trace_id"] = trace_id
+            entry["span_id"] = getattr(record, "otelSpanID", "")
+        if record.exc_info:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+# Configura o logging (force=True substitui o handler que o opentelemetry-instrument
+# já tenha criado, mantendo a injeção de trace_id/span_id nos registros)
+_handler = logging.StreamHandler()
+_handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 log = logging.getLogger(__name__)
 
 # Carrega .env para desenvolvimento local
@@ -29,7 +55,9 @@ if not DATABASE_URL or not AUTH_SERVICE_URL:
 # --- Pool de Conexão com o Banco ---
 # Inicializa o pool de conexões (Mín: 1, Máx: 5 conexões)
 try:
-    pool = SimpleConnectionPool(1, 5, dsn=DATABASE_URL)
+    # RealDictCursor é definido na conexão (e não em cada conn.cursor()) para que a
+    # instrumentação do psycopg2 continue gerando os spans das queries
+    pool = SimpleConnectionPool(1, 5, dsn=DATABASE_URL, cursor_factory=RealDictCursor)
     log.info("Pool de conexões com o PostgreSQL inicializado.")
 except psycopg2.OperationalError as e:
     log.critical(f"Erro fatal ao conectar ao PostgreSQL: {e}")
@@ -90,7 +118,7 @@ def create_flag():
     cur = None
     try:
         conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         cur.execute(
             "INSERT INTO flags (name, description, is_enabled, created_at, updated_at) "
             "VALUES (%s, %s, %s, NOW(), NOW()) RETURNING *",
@@ -125,7 +153,7 @@ def get_flags():
     cur = None
     try:
         conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         cur.execute("SELECT * FROM flags ORDER BY name")
         flags = cur.fetchall()
         return jsonify(flags)
@@ -147,7 +175,7 @@ def get_flag(name):
     cur = None
     try:
         conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         cur.execute("SELECT * FROM flags WHERE name = %s", (name,))
         flag = cur.fetchone()
         if not flag:
@@ -193,7 +221,7 @@ def update_flag(name):
     cur = None
     try:
         conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         cur.execute(query, tuple(values))
 
         if cur.rowcount == 0:
